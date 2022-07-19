@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
-
+	"github.com/azjezz/async"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -343,78 +343,68 @@ func TestSubscribePrivate(t *testing.T) {
 func TestSubscriptionEvents(t *testing.T) {
 	hub := createDummy(WithSubscriptions())
 
-	var wg sync.WaitGroup
 	ctx1, cancel1 := context.WithCancel(context.Background())
 	ctx2, cancel2 := context.WithCancel(context.Background())
-	wg.Add(3)
-	go func() {
-		// Authorized to receive connection events
-		defer wg.Done()
-		req := httptest.NewRequest("GET", defaultHubURL+"?topic=/.well-known/mercure/subscriptions/{topic}/{subscriber}", nil).WithContext(ctx1)
-		req.AddCookie(&http.Cookie{Name: "mercureAuthorization", Value: createDummyAuthorizedJWT(hub, roleSubscriber, []string{"/.well-known/mercure/subscriptions/{topic}/{subscriber}"})})
-		w := httptest.NewRecorder()
-		hub.SubscribeHandler(w, req)
+	async.Concurrently([]func() (string, error){
+		func() {
+			req := httptest.NewRequest("GET", defaultHubURL+"?topic=/.well-known/mercure/subscriptions/{topic}/{subscriber}", nil).WithContext(ctx1)
+			req.AddCookie(&http.Cookie{Name: "mercureAuthorization", Value: createDummyAuthorizedJWT(hub, roleSubscriber, []string{"/.well-known/mercure/subscriptions/{topic}/{subscriber}"})})
+			w := httptest.NewRecorder()
+			hub.SubscribeHandler(w, req)
 
-		resp := w.Result()
-		defer resp.Body.Close()
-		body, _ := ioutil.ReadAll(resp.Body)
+			resp := w.Result()
+			defer resp.Body.Close()
+			body, _ := ioutil.ReadAll(resp.Body)
 
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
-		bodyContent := string(body)
-		assert.Contains(t, bodyContent, `data:   "@context": "https://mercure.rocks/",`)
-		assert.Regexp(t, `(?m)^data:   "id": "/\.well-known/mercure/subscriptions/https%3A%2F%2Fexample\.com/.*,$`, bodyContent)
-		assert.Contains(t, bodyContent, `data:   "type": "Subscription",`)
-		assert.Contains(t, bodyContent, `data:   "subscriber": "urn:uuid:`)
-		assert.Contains(t, bodyContent, `data:   "topic": "https://example.com",`)
-		assert.Contains(t, bodyContent, `data:   "active": true,`)
-		assert.Contains(t, bodyContent, `data:   "active": false,`)
-		assert.Contains(t, bodyContent, `data:   "payload": {`)
-		assert.Contains(t, bodyContent, `data:     "foo": "bar"`)
-	}()
+			assert.Equal(t, http.StatusOK, resp.StatusCode)
+			bodyContent := string(body)
+			assert.Contains(t, bodyContent, `data:   "@context": "https://mercure.rocks/",`)
+			assert.Regexp(t, `(?m)^data:   "id": "/\.well-known/mercure/subscriptions/https%3A%2F%2Fexample\.com/.*,$`, bodyContent)
+			assert.Contains(t, bodyContent, `data:   "type": "Subscription",`)
+			assert.Contains(t, bodyContent, `data:   "subscriber": "urn:uuid:`)
+			assert.Contains(t, bodyContent, `data:   "topic": "https://example.com",`)
+			assert.Contains(t, bodyContent, `data:   "active": true,`)
+			assert.Contains(t, bodyContent, `data:   "active": false,`)
+			assert.Contains(t, bodyContent, `data:   "payload": {`)
+			assert.Contains(t, bodyContent, `data:     "foo": "bar"`)
+		},
+		func() {
+			req := httptest.NewRequest("GET", defaultHubURL+"?topic=/.well-known/mercure/subscriptions/{topicSelector}/{subscriber}", nil).WithContext(ctx2)
+			req.AddCookie(&http.Cookie{Name: "mercureAuthorization", Value: createDummyAuthorizedJWT(hub, roleSubscriber, []string{})})
+			w := httptest.NewRecorder()
+			hub.SubscribeHandler(w, req)
 
-	go func() {
-		// Not authorized to receive connection events
-		defer wg.Done()
-		req := httptest.NewRequest("GET", defaultHubURL+"?topic=/.well-known/mercure/subscriptions/{topicSelector}/{subscriber}", nil).WithContext(ctx2)
-		req.AddCookie(&http.Cookie{Name: "mercureAuthorization", Value: createDummyAuthorizedJWT(hub, roleSubscriber, []string{})})
-		w := httptest.NewRecorder()
-		hub.SubscribeHandler(w, req)
+			resp := w.Result()
+			defer resp.Body.Close()
+			body, _ := ioutil.ReadAll(resp.Body)
 
-		resp := w.Result()
-		defer resp.Body.Close()
-		body, _ := ioutil.ReadAll(resp.Body)
-
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
-		assert.Equal(t, ":\n", string(body))
-	}()
-
-	go func() {
-		defer wg.Done()
-
-		for {
-			_, s, _ := hub.transport.(TransportSubscribers).GetSubscribers()
-			if len(s) == 2 {
-				break
+			assert.Equal(t, http.StatusOK, resp.StatusCode)
+			assert.Equal(t, ":\n", string(body))
+		},
+		func() {
+			for {
+				_, s, _ := hub.transport.(TransportSubscribers).GetSubscribers()
+				if len(s) == 2 {
+					break
+				}
 			}
-		}
 
-		ctx, cancelRequest2 := context.WithCancel(context.Background())
-		req := httptest.NewRequest("GET", defaultHubURL+"?topic=https://example.com", nil).WithContext(ctx)
-		req.AddCookie(&http.Cookie{Name: "mercureAuthorization", Value: createDummyAuthorizedJWT(hub, roleSubscriber, []string{})})
+			ctx, cancelRequest2 := context.WithCancel(context.Background())
+			req := httptest.NewRequest("GET", defaultHubURL+"?topic=https://example.com", nil).WithContext(ctx)
+			req.AddCookie(&http.Cookie{Name: "mercureAuthorization", Value: createDummyAuthorizedJWT(hub, roleSubscriber, []string{})})
 
-		w := &responseTester{
-			expectedStatusCode: http.StatusOK,
-			expectedBody:       ":\n",
-			t:                  t,
-			cancel:             cancelRequest2,
-		}
-		hub.SubscribeHandler(w, req)
-		time.Sleep(1 * time.Second) // TODO: find a better way to wait for the disconnection update to be dispatched
-		cancel2()
-		cancel1()
-	}()
-
-	wg.Wait()
+			w := &responseTester{
+				expectedStatusCode: http.StatusOK,
+				expectedBody:       ":\n",
+				t:                  t,
+				cancel:             cancelRequest2,
+			}
+			hub.SubscribeHandler(w, req)
+			time.Sleep(1 * time.Second) // TODO: find a better way to wait for the disconnection update to be dispatched
+			cancel2()
+			cancel1()
+		},
+	})
 }
 
 func TestSubscribeAll(t *testing.T) {
